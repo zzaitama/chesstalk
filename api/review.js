@@ -6,8 +6,13 @@ const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
 const ipRequests = new Map();
 
 function getClientIp(req) {
+  const vercelIp = req.headers["x-vercel-forwarded-for"];
+  if (vercelIp) return vercelIp.split(",")[0].trim();
   const forwarded = req.headers["x-forwarded-for"];
-  if (forwarded) return forwarded.split(",")[0].trim();
+  if (forwarded) {
+    const parts = forwarded.split(",");
+    return parts[parts.length - 1].trim();
+  }
   return req.socket?.remoteAddress || "unknown";
 }
 
@@ -63,7 +68,7 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
-        max_tokens: max_tokens || 4000,
+        max_tokens: Math.min(Math.max(parseInt(max_tokens) || 4000, 1), 4000),
         system,
         messages,
       }),
@@ -71,7 +76,7 @@ export default async function handler(req, res) {
 
     const data = await upstream.json();
     if (!upstream.ok) {
-      return res.status(upstream.status).json({ error: data.error?.message || "Upstream error" });
+      return res.status(upstream.status).json({ error: "Analysis unavailable" });
     }
     return res.status(200).json(data);
   } catch {

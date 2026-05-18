@@ -212,7 +212,7 @@ NEVER: More than 3 sentences. Padding. Phrases like "It's important to note" or 
 
 // ── API ───────────────────────────────────────────────────────────────────────
 async function generateCommentary(moveData,eloLevel){
-  const persona=ELO_PERSONAS[eloLevel];
+  const persona=ELO_PERSONAS[eloLevel]||ELO_PERSONAS[1200];
   const isFinal=moveData.drama.includes("CHECKMATE");
   const prompt=`Game situation:
 Move ${moveData.moveNumber}${moveData.turn==="black"?"...":"."} ${moveData.move} — just played by ${moveData.turn}
@@ -273,11 +273,18 @@ function badgeStyle(type){
 }
 
 async function fetchLichessGame(url){
-  const m=url.match(/lichess\.org\/([a-zA-Z0-9]{8})/);
-  if(!m)return null;
-  const resp=await fetch(`https://lichess.org/game/export/${m[1]}?moves=true&clocks=false&evals=false`,{headers:{Accept:"application/x-chess-pgn"}});
-  if(!resp.ok)return null;
-  return resp.text();
+  const m=url.match(/lichess\.org\/([a-zA-Z0-9]+)/i);
+  if(!m||m[1].length<4)return null;
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),10000);
+  try{
+    const resp=await fetch(`https://lichess.org/game/export/${m[1]}?moves=true&clocks=false&evals=false`,{
+      headers:{Accept:"application/x-chess-pgn"},
+      signal:controller.signal,
+    });
+    if(!resp.ok)return null;
+    return resp.text();
+  }finally{clearTimeout(timer);}
 }
 
 function LichessInput({onLoad}){
@@ -423,6 +430,7 @@ function GameReview({eloLevel, ELO_PERSONAS}){
   const runReview=async(pgnText)=>{
     const p=pgnText||pgn;
     if(!p.trim())return;
+    if(p.length>500000){setError("PGN too large.");return;}
     setError("");setReview(null);setLoading(true);setSelectedMoment(null);
     const moves=parsePGN(p);
     if(!moves.length){setError("No moves found.");setLoading(false);return;}
@@ -493,7 +501,9 @@ Tune all language for ${eloLevel} ELO — ${eloLevel<=900?"plain English, no jar
       const data=await resp.json();
       const raw=data.content?.[0]?.text||"";
       const clean=raw.replace(/```json|```/g,"").trim();
-      const parsed=JSON.parse(clean);
+      let parsed;
+      try{parsed=JSON.parse(clean);}catch{throw new Error("Invalid JSON response from AI");}
+      if(!Array.isArray(parsed.keyMoments))parsed.keyMoments=[];
       setReview({...parsed,moves,totalMoves,opening});
     }catch(e){
       setError("Analysis failed: "+e.message);
@@ -782,6 +792,7 @@ function CoachReview({eloLevel, ELO_PERSONAS}){
   const runCoach=async(pgnText)=>{
     const p=pgnText||pgn;
     if(!p.trim())return;
+    if(p.length>500000){setError("PGN too large.");return;}
     setError("");setReport(null);setLoading(true);setSelectedMoment(null);
     const moves=parsePGN(p);
     if(!moves.length){setError("No moves found.");setLoading(false);return;}
@@ -881,7 +892,13 @@ Rules:
       const data=await resp.json();
       const raw=data.content?.[0]?.text||"";
       const clean=raw.replace(/```json|```/g,"").trim();
-      const parsed=JSON.parse(clean);
+      let parsed;
+      try{parsed=JSON.parse(clean);}catch{throw new Error("Invalid JSON response from AI");}
+      if(!Array.isArray(parsed.fixFirst))parsed.fixFirst=[];
+      if(!Array.isArray(parsed.missedChances))parsed.missedChances=[];
+      if(!Array.isArray(parsed.studyPlan))parsed.studyPlan=[];
+      if(!Array.isArray(parsed.advantageSwings))parsed.advantageSwings=[];
+      if(!Array.isArray(parsed.theoryGaps))parsed.theoryGaps=[];
       setReport({...parsed,moves,totalMoves,opening});
     }catch(e){
       setError("Coach failed: "+e.message);
@@ -1169,7 +1186,7 @@ export default function ChessCaster(){
         const line=typeof e.data==="string"?e.data:"";
         if(sfCallbackRef.current)sfCallbackRef.current(line);
       };
-      sf.onerror=()=>{stockfishRef.current=null;};
+      sf.onerror=()=>{stockfishRef.current=null;setApiError("Stockfish unavailable — blunder detection disabled.");};
       sf.postMessage("uci");
       sf.postMessage("isready");
       stockfishRef.current=sf;
@@ -1190,6 +1207,7 @@ export default function ChessCaster(){
     utt.rate=2.0;
     utt.pitch=0.88;
     utt.volume=1;
+    utt.onerror=()=>{};
     window.speechSynthesis.speak(utt);
   },[voiceEnabled]);
 
@@ -1354,7 +1372,7 @@ export default function ChessCaster(){
     if(raw.length>=2){const fc=FILES.indexOf(raw[raw.length-2]),fr=8-parseInt(raw[raw.length-1]);if(fc>=0&&fr>=0)hlSet.add(`${fr},${fc}`);}
   }
 
-  const persona=ELO_PERSONAS[eloLevel];
+  const persona=ELO_PERSONAS[eloLevel]||ELO_PERSONAS[1200];
   const progressPct=moves.length?((currentMove+1)/moves.length)*100:0;
 
   return(

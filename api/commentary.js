@@ -18,6 +18,11 @@ function getClientIp(req) {
 
 function checkRateLimit(ip) {
   const now = Date.now();
+  if (ipRequests.size > 5000) {
+    for (const [k, v] of ipRequests) {
+      if (now - v.windowStart > RATE_LIMIT_WINDOW_MS) ipRequests.delete(k);
+    }
+  }
   const entry = ipRequests.get(ip) || { count: 0, windowStart: now };
   if (now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
     entry.count = 0;
@@ -58,6 +63,8 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Server configuration error" });
   }
 
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
   try {
     const upstream = await fetch(ANTHROPIC_URL, {
       method: "POST",
@@ -72,14 +79,18 @@ export default async function handler(req, res) {
         system,
         messages,
       }),
+      signal: controller.signal,
     });
 
     const data = await upstream.json();
     if (!upstream.ok) {
       return res.status(upstream.status).json({ error: "Analysis unavailable" });
     }
+    res.setHeader("Cache-Control", "no-store");
     return res.status(200).json(data);
   } catch {
     return res.status(502).json({ error: "Failed to reach Anthropic API" });
+  } finally {
+    clearTimeout(timeout);
   }
 }

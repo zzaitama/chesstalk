@@ -211,7 +211,7 @@ NEVER: More than 3 sentences. Padding. Phrases like "It's important to note" or 
 };
 
 // ── API ───────────────────────────────────────────────────────────────────────
-async function generateCommentary(moveData,eloLevel){
+async function generateCommentary(moveData,eloLevel,signal){
   const persona=ELO_PERSONAS[eloLevel]||ELO_PERSONAS[1200];
   const isFinal=moveData.drama.includes("CHECKMATE");
   const prompt=`Game situation:
@@ -234,6 +234,7 @@ Deliver your commentary now.`;
       system:persona.system,
       messages:[{role:"user",content:prompt}],
     }),
+    signal,
   });
   if(!response.ok){const e=await response.json().catch(()=>({}));throw new Error(e.error||`API ${response.status}`);}
   const data=await response.json();
@@ -316,12 +317,16 @@ function LichessInput({onLoad}){
 
 // ── Game Review Component ─────────────────────────────────────────────────────
 function GameReview({eloLevel, ELO_PERSONAS}){
+  const windowWidth=useWindowWidth();
+  const isMobile=windowWidth<700;
   const[pgn,setPgn]=useState("");
   const[loading,setLoading]=useState(false);
   const[review,setReview]=useState(null);
   const[error,setError]=useState("");
   const[selectedGame,setSelectedGame]=useState("");
   const[selectedMoment,setSelectedMoment]=useState(null);
+  const[copyDone,setCopyDone]=useState(false);
+  const[history,setHistory]=useState(()=>{try{return JSON.parse(localStorage.getItem("chesstalk_review_history")||"[]");}catch{return[];}});
 
   function getMoveSquares(moves, moveIndex){
     try{
@@ -404,7 +409,7 @@ function GameReview({eloLevel, ELO_PERSONAS}){
     })()):(null);
 
     return(
-      <div style={{position:"relative",display:"inline-block",border:"2px solid #3a3245",boxShadow:"0 8px 32px rgba(0,0,0,0.6)"}}>
+      <div role="region" aria-label="Chess board" style={{position:"relative",display:"inline-block",border:"2px solid #3a3245",boxShadow:"0 8px 32px rgba(0,0,0,0.6)"}}>
         <div style={{display:"grid",gridTemplateColumns:`repeat(8,${SQ}px)`,gridTemplateRows:`repeat(8,${SQ}px)`}}>
           {RANKS.map((_,ri)=>FILES.map((_,fi)=>{
             const piece=board?.[ri]?.[fi]||null;
@@ -504,20 +509,60 @@ Tune all language for ${eloLevel} ELO — ${eloLevel<=900?"plain English, no jar
       let parsed;
       try{parsed=JSON.parse(clean);}catch{throw new Error("Invalid JSON response from AI");}
       if(!Array.isArray(parsed.keyMoments))parsed.keyMoments=[];
-      setReview({...parsed,moves,totalMoves,opening});
+      const result={...parsed,moves,totalMoves,opening};
+      setReview(result);
+      setHistory(prev=>{
+        const next=[{pgn:p,verdict:result.verdict,opening:result.opening?.name,ts:Date.now()},...prev].slice(0,5);
+        try{localStorage.setItem("chesstalk_review_history",JSON.stringify(next));}catch{}
+        return next;
+      });
     }catch(e){
       setError("Analysis failed: "+e.message);
     }finally{setLoading(false);}
+  };
+
+  const copyAnalysis=()=>{
+    if(!review)return;
+    const lines=[
+      `Game Review — ${review.opening?.name||"Unknown Opening"}`,
+      "",
+      `Opening: ${review.opening?.assessment||""}`,
+      "",
+      `Phases:`,
+      `  Opening: ${review.phases?.opening||""}`,
+      `  Middlegame: ${review.phases?.middlegame||""}`,
+      `  Endgame: ${review.phases?.endgame||""}`,
+      "",
+    ];
+    if(review.keyMoments?.length){
+      lines.push("Key Moments:");
+      review.keyMoments.forEach(m=>{
+        const mn=Math.floor(m.moveIndex/2)+1;
+        const t=m.moveIndex%2===0?"":"...";
+        lines.push(`  ${mn}${t} ${m.move} [${m.type}] — ${m.headline}: ${m.detail}`);
+      });
+      lines.push("");
+    }
+    if(review.biggestMistake){
+      const bm=review.biggestMistake;
+      lines.push(`Biggest Mistake: ${Math.floor(bm.moveIndex/2)+1}${bm.moveIndex%2===0?".":"..."} ${bm.move} (${bm.side}) — ${bm.detail}`,"");
+    }
+    if(review.verdict)lines.push(`Verdict: ${review.verdict}`,"");
+    if(review.takeaway)lines.push(`Takeaway: ${review.takeaway}`);
+    navigator.clipboard.writeText(lines.join("\n")).then(()=>{
+      setCopyDone(true);
+      setTimeout(()=>setCopyDone(false),2000);
+    }).catch(()=>{});
   };
 
   const momentColors={TURNING_POINT:"#f59e0b",BLUNDER:"#ff4444",BRILLIANT:"#ffd700",MOMENTUM_SHIFT:"#60a5fa",MISSED_CHANCE:"#c084fc"};
   const momentIcons={TURNING_POINT:"⚡",BLUNDER:"💀",BRILLIANT:"✨",MOMENTUM_SHIFT:"📈",MISSED_CHANCE:"😬"};
 
   return(
-    <div style={{flex:1,display:"flex",overflow:"hidden"}}>
+    <div style={{flex:1,display:"flex",overflow:"hidden",flexDirection:isMobile?"column":"row"}}>
 
       {/* Left: input */}
-      <div style={{width:340,flexShrink:0,borderRight:"1px solid #1e1c28",padding:20,display:"flex",flexDirection:"column",gap:14,overflowY:"auto"}}>
+      <div style={{width:isMobile?"100%":340,flexShrink:0,borderRight:"1px solid #1e1c28",padding:20,display:"flex",flexDirection:"column",gap:14,overflowY:"auto",maxHeight:isMobile?"45vh":undefined}}>
         <div style={{fontSize:11,letterSpacing:2,color:"#b8904a",textTransform:"uppercase"}}>Game Review</div>
         <div style={{fontSize:12,color:"#6a6070",lineHeight:1.6}}>Paste a game and get a breakdown of key moments, turning points, and your main takeaway.</div>
         <div style={{fontSize:10,letterSpacing:2,color:"#4a4258",textTransform:"uppercase",marginBottom:2}}>Sample Games</div>
@@ -667,13 +712,21 @@ Tune all language for ${eloLevel} ELO — ${eloLevel<=900?"plain English, no jar
               </div>
             )}
 
+            {/* Copy Analysis */}
+            <button onClick={copyAnalysis} style={{
+              alignSelf:"flex-start",padding:"8px 16px",background:"transparent",
+              border:"1px solid #2a2235",borderRadius:4,color:copyDone?"#4ade80":"#7a6a58",
+              fontSize:11,fontFamily:"monospace",cursor:"pointer",letterSpacing:1,
+              transition:"all 0.2s",
+            }}>{copyDone?"✓ Copied":"Copy Analysis"}</button>
+
           </div>
         )}
       </div>
 
       {/* Right: board panel — appears when a moment is selected */}
       {selectedMoment&&review&&(
-        <div style={{width:420,flexShrink:0,borderLeft:"1px solid #1e1c28",padding:20,display:"flex",flexDirection:"column",gap:16,background:"#0a090f"}}>
+        <div style={{width:isMobile?"100%":420,flexShrink:0,borderLeft:"1px solid #1e1c28",padding:20,display:"flex",flexDirection:"column",gap:16,background:"#0a090f"}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
             <div>
               <div style={{fontSize:9,letterSpacing:3,color:"#b8904a",textTransform:"uppercase",marginBottom:4}}>Position After Move</div>
@@ -701,12 +754,16 @@ Tune all language for ${eloLevel} ELO — ${eloLevel<=900?"plain English, no jar
 
 // ── Coach Review Component ────────────────────────────────────────────────────
 function CoachReview({eloLevel, ELO_PERSONAS}){
+  const windowWidth=useWindowWidth();
+  const isMobile=windowWidth<700;
   const[pgn,setPgn]=useState("");
   const[loading,setLoading]=useState(false);
   const[report,setReport]=useState(null);
   const[error,setError]=useState("");
   const[selectedGame,setSelectedGame]=useState("");
   const[selectedMoment,setSelectedMoment]=useState(null);
+  const[copyDone,setCopyDone]=useState(false);
+  const[history,setHistory]=useState(()=>{try{return JSON.parse(localStorage.getItem("chesstalk_coach_history")||"[]");}catch{return[];}});
 
   function getMoveSquares(moves,moveIndex){
     try{
@@ -766,7 +823,7 @@ function CoachReview({eloLevel, ELO_PERSONAS}){
     })():null;
 
     return(
-      <div style={{position:"relative",display:"inline-block",border:"2px solid #3a3245",boxShadow:"0 4px 20px rgba(0,0,0,0.5)"}}>
+      <div role="region" aria-label="Chess board" style={{position:"relative",display:"inline-block",border:"2px solid #3a3245",boxShadow:"0 4px 20px rgba(0,0,0,0.5)"}}>
         <div style={{display:"grid",gridTemplateColumns:`repeat(8,${SQ}px)`,gridTemplateRows:`repeat(8,${SQ}px)`}}>
           {RANKS.map((_,ri)=>FILES.map((_,fi)=>{
             const piece=board?.[ri]?.[fi]||null;
@@ -899,10 +956,50 @@ Rules:
       if(!Array.isArray(parsed.studyPlan))parsed.studyPlan=[];
       if(!Array.isArray(parsed.advantageSwings))parsed.advantageSwings=[];
       if(!Array.isArray(parsed.theoryGaps))parsed.theoryGaps=[];
-      setReport({...parsed,moves,totalMoves,opening});
+      const result={...parsed,moves,totalMoves,opening};
+      setReport(result);
+      setHistory(prev=>{
+        const next=[{pgn:p,summary:result.playerSummary,opening,ts:Date.now()},...prev].slice(0,5);
+        try{localStorage.setItem("chesstalk_coach_history",JSON.stringify(next));}catch{}
+        return next;
+      });
     }catch(e){
       setError("Coach failed: "+e.message);
     }finally{setLoading(false);}
+  };
+
+  const copyCoachReport=()=>{
+    if(!report)return;
+    const lines=[`Coach Review — ${report.opening||"Unknown Opening"}`,"",`Coach's Read: ${report.playerSummary}`,""];
+    if(report.fixFirst?.length){
+      lines.push("Fix These First:");
+      report.fixFirst.forEach(item=>{
+        const mn=Math.floor(item.moveIndex/2)+1;
+        lines.push(`  ${mn}${item.moveIndex%2===0?".":"..."} ${item.move} [${item.conceptName}]`);
+        lines.push(`  What: ${item.what}`);
+        lines.push(`  Why: ${item.why}`);
+        if(item.remember)lines.push(`  Remember: ${item.remember}`);
+        lines.push("");
+      });
+    }
+    if(report.missedChances?.length){
+      lines.push("Missed Chances:");
+      report.missedChances.forEach(item=>{
+        lines.push(`  ${item.conceptName}: ${item.what}`);
+        if(item.remember)lines.push(`  Remember: ${item.remember}`);
+        lines.push("");
+      });
+    }
+    if(report.studyPlan?.length){
+      lines.push("Study Plan:");
+      report.studyPlan.forEach((item,i)=>lines.push(`  ${i+1}. ${item}`));
+      lines.push("");
+    }
+    if(report.coachSignoff)lines.push(`Coach: ${report.coachSignoff}`);
+    navigator.clipboard.writeText(lines.join("\n")).then(()=>{
+      setCopyDone(true);
+      setTimeout(()=>setCopyDone(false),2000);
+    }).catch(()=>{});
   };
 
   const severityColor={critical:"#ff4444",significant:"#f59e0b"};
@@ -959,10 +1056,10 @@ Rules:
   );
 
   return(
-    <div style={{flex:1,display:"flex",overflow:"hidden"}}>
+    <div style={{flex:1,display:"flex",overflow:"hidden",flexDirection:isMobile?"column":"row"}}>
 
       {/* Left: input */}
-      <div style={{width:300,flexShrink:0,borderRight:"1px solid #1e1c28",padding:20,display:"flex",flexDirection:"column",gap:14,overflowY:"auto"}}>
+      <div style={{width:isMobile?"100%":300,flexShrink:0,borderRight:"1px solid #1e1c28",padding:20,display:"flex",flexDirection:"column",gap:14,overflowY:"auto",maxHeight:isMobile?"45vh":undefined}}>
         <div style={{fontSize:11,letterSpacing:2,color:"#b8904a",textTransform:"uppercase"}}>Coach Review</div>
         <div style={{fontSize:12,color:"#6a6070",lineHeight:1.6}}>Upload your game. Get a narrated coaching session — what went wrong, what you missed, and what to study.</div>
         <div style={{fontSize:10,letterSpacing:2,color:"#4a4258",textTransform:"uppercase",marginBottom:2}}>Sample Games</div>
@@ -1114,6 +1211,14 @@ Rules:
               </div>
             )}
 
+            {/* Copy report */}
+            <button onClick={copyCoachReport} style={{
+              alignSelf:"flex-start",padding:"8px 16px",background:"transparent",
+              border:"1px solid #2a2235",borderRadius:4,color:copyDone?"#4ade80":"#7a6a58",
+              fontSize:11,fontFamily:"monospace",cursor:"pointer",letterSpacing:1,
+              transition:"all 0.2s",
+            }}>{copyDone?"✓ Copied":"Copy Report"}</button>
+
           </div>
         )}
       </div>
@@ -1121,6 +1226,16 @@ Rules:
   );
 }
 
+
+function useWindowWidth(){
+  const[w,setW]=useState(()=>window.innerWidth);
+  useEffect(()=>{
+    const handler=()=>setW(window.innerWidth);
+    window.addEventListener("resize",handler);
+    return()=>window.removeEventListener("resize",handler);
+  },[]);
+  return w;
+}
 
 function CtrlBtn({onClick,disabled,title}){
   return(
@@ -1157,6 +1272,7 @@ export default function ChessCaster(){
   const stockfishRef=useRef(null);
   const sfCallbackRef=useRef(null);
   const prevEvalRef=useRef(null);
+  const commentaryAbortRef=useRef(null);
   const boardsRef=useRef([]);
 
   useEffect(()=>{
@@ -1190,14 +1306,19 @@ export default function ChessCaster(){
       sf.postMessage("uci");
       sf.postMessage("isready");
       stockfishRef.current=sf;
-      return()=>{sf.terminate();};
+      return()=>{sf.terminate();sfCallbackRef.current=null;};
     }catch{}
   },[]);
+
+  const windowWidth=useWindowWidth();
+  const isMobile=windowWidth<700;
+  const sqSize=isMobile?Math.max(36,Math.floor((Math.min(windowWidth,480)-56)/8)):44;
 
   const currentBoard=boards[currentMove+1]||boards[0]||fenToBoard(INITIAL_FEN);
 
   useEffect(()=>{isAutoRef.current=isAutoPlaying;},[isAutoPlaying]);
   useEffect(()=>{currentMoveRef.current=currentMove;},[currentMove]);
+  useEffect(()=>{if(commentaryRef.current)commentaryRef.current.scrollTop=0;},[currentMove]);
 
   const speak=useCallback((text)=>{
     if(!voiceEnabled)return;
@@ -1236,6 +1357,9 @@ export default function ChessCaster(){
   },[pgn]);
 
   const fetchCommentary=useCallback(async(idx,movesArr,openingStr)=>{
+    if(commentaryAbortRef.current)commentaryAbortRef.current.abort();
+    const controller=new AbortController();
+    commentaryAbortRef.current=controller;
     const moveStr=movesArr[idx];
     const turn=idx%2===0?"white":"black";
     const moveNumber=Math.floor(idx/2)+1;
@@ -1278,16 +1402,21 @@ export default function ChessCaster(){
         prevEvalRef.current=evalWhite;
       }
     }
+    if(controller.signal.aborted)return;
     const moveData={move:moveStr,moveNumber,turn,opening:det||openingStr,phase:gamePhase,recentHistory,drama,positionNotes};
     setLoadingIdx(idx);setApiError(null);
     try{
-      const text=await generateCommentary(moveData,eloLevel);
+      const text=await generateCommentary(moveData,eloLevel,controller.signal);
+      if(controller.signal.aborted)return;
       setCommentary(prev=>({...prev,[idx]:{text,move:moveStr,moveNumber,turn,drama}}));
       speak(text);
     }catch(e){
+      if(controller.signal.aborted)return;
       setApiError(e.message);
       setCommentary(prev=>({...prev,[idx]:{text:"⚠ Commentary unavailable for this move.",move:moveStr,moveNumber,turn,drama}}));
-    }finally{setLoadingIdx(null);}
+    }finally{
+      if(!controller.signal.aborted)setLoadingIdx(null);
+    }
   },[eloLevel,speak]);
 
   const goToMove=useCallback(async(idx,movesArr,openingStr)=>{
@@ -1379,7 +1508,7 @@ export default function ChessCaster(){
     <div style={{minHeight:"100vh",background:"#0c0b10",color:"#e2d9c8",fontFamily:"'Georgia','Times New Roman',serif",display:"flex",flexDirection:"column"}}>
 
       {/* Header */}
-      <header style={{padding:"16px 24px",borderBottom:"1px solid #1e1c28",display:"flex",alignItems:"center",justifyContent:"space-between",background:"#0e0d14"}}>
+      <header style={{padding:isMobile?"10px 14px":"16px 24px",borderBottom:"1px solid #1e1c28",display:"flex",alignItems:"center",justifyContent:"space-between",background:"#0e0d14",flexWrap:"wrap",gap:8}}>
         <div>
           <div style={{display:"flex",alignItems:"baseline",gap:10}}>
             <span style={{fontSize:24,fontWeight:700,color:"#f0e0c0",letterSpacing:"-0.5px"}}>♟ ChessCaster</span>
@@ -1389,11 +1518,11 @@ export default function ChessCaster(){
           </div>
           <div style={{fontSize:11,color:"#3a3230",letterSpacing:1,marginTop:1}}>AI Sports Commentary for Chess</div>
         </div>
-        <div style={{display:"flex",alignItems:"center",gap:16}}>
+        <div style={{display:"flex",alignItems:"center",gap:isMobile?8:16,flexWrap:"wrap"}}>
           {/* Tab switcher */}
-          <div style={{display:"flex",gap:2,background:"#0a090f",borderRadius:6,padding:3,border:"1px solid #2a2235"}}>
+          <div role="tablist" aria-label="App sections" style={{display:"flex",gap:2,background:"#0a090f",borderRadius:6,padding:3,border:"1px solid #2a2235"}}>
             {[["broadcast","📡 Broadcast"],["review","🔍 Game Review"],["coach","🎓 Coach"]].map(([tab,label])=>(
-              <button key={tab} onClick={()=>setActiveTab(tab)} style={{
+              <button key={tab} role="tab" aria-selected={activeTab===tab} onClick={()=>setActiveTab(tab)} style={{
                 padding:"6px 16px",borderRadius:4,fontSize:11,fontFamily:"monospace",cursor:"pointer",
                 border:"none",
                 background:activeTab===tab?"rgba(184,144,74,0.2)":"transparent",
@@ -1420,10 +1549,10 @@ export default function ChessCaster(){
       </header>
 
       {activeTab==="broadcast"&&(
-        <div style={{display:"flex",flex:1,overflow:"hidden"}}>
+        <div style={{display:"flex",flex:1,overflow:"hidden",flexDirection:isMobile?"column":"row"}}>
 
           {/* Left panel */}
-          <div style={{width:420,flexShrink:0,borderRight:"1px solid #1e1c28",display:"flex",flexDirection:"column",overflowY:"auto",padding:20,gap:16}}>
+          <div style={{width:isMobile?"100%":420,flexShrink:0,borderRight:"1px solid #1e1c28",display:"flex",flexDirection:"column",overflowY:"auto",padding:20,gap:16,maxHeight:isMobile?"55vh":undefined}}>
 
             {phase==="setup"&&(
               <>
@@ -1462,24 +1591,24 @@ export default function ChessCaster(){
                   <div style={{display:"flex",alignItems:"flex-start",gap:6}}>
                     <div style={{display:"flex",flexDirection:"column",paddingTop:0}}>
                       {RANKS.map(r=>(
-                        <div key={r} style={{height:44,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,color:"#4a4238",fontFamily:"monospace",width:12}}>{r}</div>
+                        <div key={r} style={{height:sqSize,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,color:"#4a4238",fontFamily:"monospace",width:12}}>{r}</div>
                       ))}
                     </div>
-                    <div style={{display:"grid",gridTemplateColumns:"repeat(8, 44px)",gridTemplateRows:"repeat(8, 44px)",border:"2px solid #2a2235",boxShadow:"0 4px 40px rgba(0,0,0,0.7)"}}>
+                    <div role="region" aria-label="Chess board" style={{display:"grid",gridTemplateColumns:`repeat(8,${sqSize}px)`,gridTemplateRows:`repeat(8,${sqSize}px)`,border:"2px solid #2a2235",boxShadow:"0 4px 40px rgba(0,0,0,0.7)"}}>
                       {RANKS.map((_,ri)=>FILES.map((_,fi)=>{
                         const piece=currentBoard[ri]?.[fi]||null;
                         const pr=piece?PIECE_RENDER[piece]:null;
                         const hl=hlSet.has(`${ri},${fi}`);
                         return(
-                          <div key={`${ri},${fi}`} style={{width:44,height:44,background:sqColor(ri,fi,hl),display:"flex",alignItems:"center",justifyContent:"center",userSelect:"none"}}>
-                            {pr&&<span style={{fontSize:30,lineHeight:1,color:pr.color,textShadow:pr.shadow}}>{pr.sym}</span>}
+                          <div key={`${ri},${fi}`} style={{width:sqSize,height:sqSize,background:sqColor(ri,fi,hl),display:"flex",alignItems:"center",justifyContent:"center",userSelect:"none"}}>
+                            {pr&&<span style={{fontSize:Math.round(sqSize*0.68),lineHeight:1,color:pr.color,textShadow:pr.shadow}}>{pr.sym}</span>}
                           </div>
                         );
                       }))}
                     </div>
                   </div>
                   <div style={{display:"flex",paddingLeft:18,marginTop:3}}>
-                    {FILES.map(f=><div key={f} style={{width:44,textAlign:"center",fontSize:10,color:"#4a4238",fontFamily:"monospace"}}>{f}</div>)}
+                    {FILES.map(f=><div key={f} style={{width:sqSize,textAlign:"center",fontSize:10,color:"#4a4238",fontFamily:"monospace"}}>{f}</div>)}
                   </div>
                 </div>
 
@@ -1544,7 +1673,7 @@ export default function ChessCaster(){
               {apiError&&<span style={{fontSize:10,color:"#ff5555",maxWidth:260,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>⚠ {apiError}</span>}
             </div>
 
-            <div ref={commentaryRef} style={{flex:1,overflowY:"auto",padding:"28px 28px",display:"flex",flexDirection:"column",gap:28}}>
+            <div ref={commentaryRef} aria-live="polite" aria-label="Commentary feed" style={{flex:1,overflowY:"auto",padding:"28px 28px",display:"flex",flexDirection:"column",gap:28}}>
               {phase==="setup"&&(
                 <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:12,color:"#6a6070"}}>
                   <div style={{fontSize:52}}>♟</div>

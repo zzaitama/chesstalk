@@ -109,6 +109,16 @@ function buildAllBoards(moves){
   return boards;
 }
 
+function boardToFen(board,turn){
+  const rows=board.map(row=>{
+    let str="",empty=0;
+    for(const sq of row){if(sq){if(empty){str+=empty;empty=0;}str+=sq;}else empty++;}
+    if(empty)str+=empty;
+    return str;
+  });
+  return rows.join("/")+` ${turn} - - 0 1`;
+}
+
 // ── Opening detection ─────────────────────────────────────────────────────────
 function detectOpening(moves){
   const m=moves.slice(0,8).join(" ");
@@ -154,7 +164,7 @@ function shouldCommentate(idx, moves, prevOpening, newOpening){
   if(idx===1)return true;
   const move=moves[idx];
   const drama=detectDrama(move);
-  if(drama.some(d=>["CHECKMATE","CHECK","DOUBLE CHECK","BRILLIANT","BLUNDER","CAPTURE","CASTLING","PROMOTION"].includes(d)))return true;
+  if(drama.some(d=>["CHECKMATE","CHECK","DOUBLE CHECK","BRILLIANT","BLUNDER","SWING","CAPTURE","CASTLING","PROMOTION"].includes(d)))return true;
   if(newOpening&&newOpening!==prevOpening)return true;
   if(idx===10||idx===Math.floor(moves.length*0.6))return true;
   if(idx>0&&idx%8===0)return true;
@@ -216,17 +226,16 @@ ${isFinal?"THIS IS THE FINAL MOVE OF THE GAME. Make it a moment. Deliver the bro
 
 Deliver your commentary now.`;
 
-  const response=await fetch("https://api.anthropic.com/v1/messages",{
+  const response=await fetch("/api/commentary",{
     method:"POST",
     headers:{"Content-Type":"application/json"},
     body:JSON.stringify({
-      model:"claude-sonnet-4-20250514",
       max_tokens:1000,
       system:persona.system,
       messages:[{role:"user",content:prompt}],
     }),
   });
-  if(!response.ok){const e=await response.json().catch(()=>({}));throw new Error(e.error?.message||`API ${response.status}`);}
+  if(!response.ok){const e=await response.json().catch(()=>({}));throw new Error(e.error||`API ${response.status}`);}
   const data=await response.json();
   if(data.content?.[0]?.text)return data.content[0].text;
   throw new Error("Empty API response");
@@ -259,7 +268,43 @@ function badgeStyle(type){
   if(["BLUNDER","DUBIOUS"].includes(type))return{color:"#ff4444",border:"1px solid #ff444450"};
   if(["CHECK","DOUBLE CHECK"].includes(type))return{color:"#ff9900",border:"1px solid #ff990050"};
   if(["CAPTURE","CASTLING","PROMOTION","INTERESTING"].includes(type))return{color:"#60a5fa",border:"1px solid #60a5fa50"};
+  if(type==="SWING")return{color:"#c084fc",border:"1px solid #c084fc50"};
   return{color:"#666",border:"1px solid #44444450"};
+}
+
+async function fetchLichessGame(url){
+  const m=url.match(/lichess\.org\/([a-zA-Z0-9]{8})/);
+  if(!m)return null;
+  const resp=await fetch(`https://lichess.org/game/export/${m[1]}?moves=true&clocks=false&evals=false`,{headers:{Accept:"application/x-chess-pgn"}});
+  if(!resp.ok)return null;
+  return resp.text();
+}
+
+function LichessInput({onLoad}){
+  const[url,setUrl]=useState("");
+  const[fetching,setFetching]=useState(false);
+  const[err,setErr]=useState("");
+  const go=async()=>{
+    if(!url.trim())return;
+    setErr("");setFetching(true);
+    try{
+      const pgn=await fetchLichessGame(url);
+      if(!pgn){setErr("Game not found or invalid URL.");return;}
+      onLoad(pgn);setUrl("");
+    }catch{setErr("Failed to fetch game.");}
+    finally{setFetching(false);}
+  };
+  return(
+    <div style={{marginBottom:10}}>
+      <div style={{fontSize:10,letterSpacing:2,color:"#4a4258",textTransform:"uppercase",marginBottom:6}}>Lichess URL</div>
+      <div style={{display:"flex",gap:6}}>
+        <input value={url} onChange={e=>{setUrl(e.target.value);setErr("");}} onKeyDown={e=>e.key==="Enter"&&go()}
+          placeholder="lichess.org/xxxxxxxx" style={{flex:1,background:"#0a090f",border:"1px solid #2a2235",borderRadius:4,color:"#b8904a",padding:"7px 10px",fontSize:11,fontFamily:"monospace",outline:"none"}}/>
+        <button onClick={go} disabled={fetching||!url.trim()} style={{padding:"7px 12px",borderRadius:4,fontSize:11,cursor:"pointer",background:"transparent",border:"1px solid #2a2235",color:fetching?"#4a4258":"#7a6a58",whiteSpace:"nowrap"}}>{fetching?"…":"Load"}</button>
+      </div>
+      {err&&<div style={{color:"#ff5555",fontSize:10,marginTop:4}}>{err}</div>}
+    </div>
+  );
 }
 
 // ── Game Review Component ─────────────────────────────────────────────────────
@@ -434,17 +479,17 @@ Rules for keyMoments: Include 3-6 moments only. Only the genuinely important one
 Tune all language for ${eloLevel} ELO — ${eloLevel<=900?"plain English, no jargon":eloLevel<=1400?"club player language":"advanced chess vocabulary"}.`;
 
     try{
-      const resp=await fetch("https://api.anthropic.com/v1/messages",{
+      const resp=await fetch("/api/review",{
         method:"POST",
         headers:{"Content-Type":"application/json"},
         body:JSON.stringify({
-          model:"claude-sonnet-4-20250514",
           max_tokens:4000,
           system:"You are a chess game analyzer. Always respond with valid JSON only. No markdown fences, no explanation text, just the raw JSON object.",
           messages:[{role:"user",content:prompt}],
         }),
       });
-      if(!resp.ok)throw new Error(`API ${resp.status}`);
+      if(!resp.ok){const e=await resp.json().catch(()=>({}));throw new Error(e.error||`API ${resp.status}`);}
+
       const data=await resp.json();
       const raw=data.content?.[0]?.text||"";
       const clean=raw.replace(/```json|```/g,"").trim();
@@ -475,6 +520,7 @@ Tune all language for ${eloLevel} ELO — ${eloLevel<=900?"plain English, no jar
           }}>{name}</button>
         ))}
         <div style={{borderTop:"1px solid #1e1c28",paddingTop:14}}>
+          <LichessInput onLoad={p=>{setPgn(p);setSelectedGame("");runReview(p);}}/>
           <div style={{fontSize:10,letterSpacing:2,color:"#4a4258",textTransform:"uppercase",marginBottom:8}}>Or Paste PGN</div>
           <textarea value={pgn} onChange={e=>{setPgn(e.target.value);setSelectedGame("");}} placeholder="Paste any PGN here..." rows={8} style={{
             width:"100%",boxSizing:"border-box",background:"#0a090f",border:"1px solid #2a2235",
@@ -821,17 +867,17 @@ Rules:
 - All language tuned for ${eloLevel} ELO. ${eloLevel<=900?"Avoid jargon. Be encouraging. Very plain language.":eloLevel<=1400?"Some chess terms OK. Focus on patterns.":"Full chess vocabulary. Be direct and analytical."}`;
 
     try{
-      const resp=await fetch("https://api.anthropic.com/v1/messages",{
+      const resp=await fetch("/api/review",{
         method:"POST",
         headers:{"Content-Type":"application/json"},
         body:JSON.stringify({
-          model:"claude-sonnet-4-20250514",
           max_tokens:4000,
           system:"You are an expert chess coach. Always respond with valid JSON only. No markdown, no explanation, just the raw JSON object.",
           messages:[{role:"user",content:prompt}],
         }),
       });
-      if(!resp.ok)throw new Error(`API ${resp.status}`);
+      if(!resp.ok){const e=await resp.json().catch(()=>({}));throw new Error(e.error||`API ${resp.status}`);}
+
       const data=await resp.json();
       const raw=data.content?.[0]?.text||"";
       const clean=raw.replace(/```json|```/g,"").trim();
@@ -912,6 +958,7 @@ Rules:
           }}>{name}</button>
         ))}
         <div style={{borderTop:"1px solid #1e1c28",paddingTop:14}}>
+          <LichessInput onLoad={p=>{setPgn(p);setSelectedGame("");runCoach(p);}}/>
           <div style={{fontSize:10,letterSpacing:2,color:"#4a4258",textTransform:"uppercase",marginBottom:6}}>Or Paste PGN</div>
           <textarea value={pgn} onChange={e=>{setPgn(e.target.value);setSelectedGame("");}} placeholder="Paste your game PGN..." rows={7} style={{
             width:"100%",boxSizing:"border-box",background:"#0a090f",border:"1px solid #2a2235",
@@ -1090,6 +1137,10 @@ export default function ChessCaster(){
   const currentMoveRef=useRef(-1);
   const[voiceEnabled,setVoiceEnabled]=useState(false);
   const voiceRef=useRef(null);
+  const stockfishRef=useRef(null);
+  const sfCallbackRef=useRef(null);
+  const prevEvalRef=useRef(null);
+  const boardsRef=useRef([]);
 
   useEffect(()=>{
     const pick=()=>{
@@ -1106,6 +1157,24 @@ export default function ChessCaster(){
     pick();
     window.speechSynthesis.onvoiceschanged=pick;
     return()=>{window.speechSynthesis.onvoiceschanged=null;};
+  },[]);
+
+  useEffect(()=>{
+    try{
+      const blob=new Blob(['importScripts("https://cdn.jsdelivr.net/npm/stockfish@16/src/stockfish.js")'],{type:"application/javascript"});
+      const url=URL.createObjectURL(blob);
+      const sf=new Worker(url);
+      URL.revokeObjectURL(url);
+      sf.onmessage=(e)=>{
+        const line=typeof e.data==="string"?e.data:"";
+        if(sfCallbackRef.current)sfCallbackRef.current(line);
+      };
+      sf.onerror=()=>{stockfishRef.current=null;};
+      sf.postMessage("uci");
+      sf.postMessage("isready");
+      stockfishRef.current=sf;
+      return()=>{sf.terminate();};
+    }catch{}
   },[]);
 
   const currentBoard=boards[currentMove+1]||boards[0]||fenToBoard(INITIAL_FEN);
@@ -1128,14 +1197,18 @@ export default function ChessCaster(){
     window.speechSynthesis.cancel();
   },[]);
 
-  const loadGame=useCallback(()=>{
-    if(!pgn.trim())return;
+  const loadGame=useCallback((overridePgn)=>{
+    const p=overridePgn||pgn;
+    if(!p.trim())return;
     setParseError("");
     try{
-      const parsed=parsePGN(pgn);
+      const parsed=parsePGN(p);
       if(!parsed.length){setParseError("No moves found. Check PGN format.");return;}
+      const built=buildAllBoards(parsed);
       setMoves(parsed);
-      setBoards(buildAllBoards(parsed));
+      setBoards(built);
+      boardsRef.current=built;
+      prevEvalRef.current=null;
       setCurrentMove(-1);
       setCommentary({});
       setOpening(null);
@@ -1152,13 +1225,41 @@ export default function ChessCaster(){
     const det=detectOpening(playedSoFar);
     if(det)setOpening(det);
     const gamePhase=idx<10?"opening":idx<movesArr.length*0.6?"middlegame":"endgame";
-    const drama=detectDrama(moveStr);
+    const drama=[...detectDrama(moveStr)];
     const recentHistory=movesArr.slice(Math.max(0,idx-5),idx).join(" ")||"Opening move";
     const captures=playedSoFar.filter(m=>m.includes("x")).length;
     let positionNotes=det?`Opening: ${det}. `:(openingStr?`Opening: ${openingStr}. `:"");
     if(gamePhase==="endgame")positionNotes+="Endgame reached. ";
     if(captures>8)positionNotes+="Sharp tactical game.";
     else if(captures===0&&idx>10)positionNotes+="Quiet positional game so far.";
+    if(stockfishRef.current&&boardsRef.current.length>idx+1){
+      const sideToMove=idx%2===0?"b":"w";
+      const fen=boardToFen(boardsRef.current[idx+1],sideToMove);
+      const score=await new Promise((resolve)=>{
+        let lastCp=null,waitingReady=true;
+        const timer=setTimeout(()=>{if(sfCallbackRef.current===cb)sfCallbackRef.current=null;resolve(null);},8000);
+        const cb=(line)=>{
+          if(waitingReady){if(line==="readyok"){waitingReady=false;stockfishRef.current.postMessage(`position fen ${fen}`);stockfishRef.current.postMessage("go depth 12");}return;}
+          if(line.includes("score cp")){const m=line.match(/score cp (-?\d+)/);if(m)lastCp=parseInt(m[1]);}
+          if(line.startsWith("bestmove")){clearTimeout(timer);sfCallbackRef.current=null;resolve(lastCp);}
+        };
+        sfCallbackRef.current=cb;
+        stockfishRef.current.postMessage("stop");
+        stockfishRef.current.postMessage("isready");
+      });
+      if(score!==null){
+        const evalWhite=sideToMove==="w"?score:-score;
+        if(prevEvalRef.current!==null){
+          const swing=evalWhite-prevEvalRef.current;
+          if(Math.abs(swing)>150){
+            const whiteMoved=idx%2===0;
+            if(whiteMoved?swing<-150:swing>150){if(!drama.includes("BLUNDER"))drama.push("BLUNDER");}
+            else drama.push("SWING");
+          }
+        }
+        prevEvalRef.current=evalWhite;
+      }
+    }
     const moveData={move:moveStr,moveNumber,turn,opening:det||openingStr,phase:gamePhase,recentHistory,drama,positionNotes};
     setLoadingIdx(idx);setApiError(null);
     try{
@@ -1242,6 +1343,7 @@ export default function ChessCaster(){
   const resetToSetup=()=>{
     stopAutoPlay();
     stopSpeaking();
+    prevEvalRef.current=null;boardsRef.current=[];
     setPhase("setup");setMoves([]);setBoards([]);setCurrentMove(-1);
     setCommentary({});setOpening(null);setSelectedGame("");setPgn("");setApiError(null);
   };
@@ -1317,6 +1419,7 @@ export default function ChessCaster(){
                   }}>{name}</button>
                 ))}
                 <div style={{borderTop:"1px solid #1e1c28",paddingTop:16}}>
+                  <LichessInput onLoad={p=>{setPgn(p);setSelectedGame("");loadGame(p);}}/>
                   <div style={{fontSize:10,letterSpacing:2,color:"#4a4238",textTransform:"uppercase",marginBottom:8}}>Or Paste PGN</div>
                   <textarea value={pgn} onChange={e=>setPgn(e.target.value)} placeholder="Paste any PGN here..." rows={7} style={{
                     width:"100%",boxSizing:"border-box",background:"#0a090f",border:"1px solid #2a2235",
